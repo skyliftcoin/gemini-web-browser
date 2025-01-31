@@ -185,6 +185,7 @@ class BrowserWindow(QMainWindow):
                 url = 'https://' + url
             
             logger.info(f"Navigating to: {url}")
+            self.page_load_complete = False  # Reset page load state
             self.browser.setUrl(QUrl(url))
             
         except Exception as e:
@@ -208,7 +209,7 @@ class BrowserWindow(QMainWindow):
             message = self.chat_input.text().strip()
             if not message:
                 return
-                
+            
             # Clear input
             self.chat_input.clear()
             
@@ -222,19 +223,19 @@ class BrowserWindow(QMainWindow):
             screenshot = None
             if current_url:
                 screenshot = self.capture_screenshot()
-            
+        
             # Process with Gemini
             response = self.gemini.process_request(message, current_url, screenshot)
-            
+        
             # Handle response
             if isinstance(response, str):
                 self.chat_history.append(f"Assistant: {response}")
             elif isinstance(response, dict):
                 # First handle any message
                 if 'message' in response:
-                    # Parse JSON strings in message
                     try:
                         message_lines = response['message'].strip().split('\n')
+                        processed_actions = set()  # Track processed actions
                         for line in message_lines:
                             line = line.strip()
                             if not line:
@@ -243,26 +244,21 @@ class BrowserWindow(QMainWindow):
                                 # Try to parse as JSON
                                 action = json.loads(line)
                                 if isinstance(action, dict) and 'action' in action:
-                                    self.queue_action(action)
+                                    # Create unique key for action
+                                    action_key = f"{action['action']}:{action.get('value', '')}:{action.get('url', '')}"
+                                    if action_key not in processed_actions:
+                                        self.queue_action(action)
+                                        processed_actions.add(action_key)
                                 else:
                                     self.chat_history.append(f"Assistant: {line}")
                             except json.JSONDecodeError:
                                 # Not JSON, treat as normal message
                                 self.chat_history.append(f"Assistant: {line}")
                     except Exception as e:
-                        logger.error(f"Error parsing message: {e}")
-                        self.chat_history.append(f"Assistant: {response['message']}")
-                
-                # Then handle any explicit actions
-                if 'actions' in response and isinstance(response['actions'], list):
-                    for action in response['actions']:
-                        if isinstance(action, dict) and 'action' in action:
-                            self.queue_action(action)
-            else:
-                logger.warning(f"Invalid response type: {type(response)}")
-            
+                        logger.error(f"Error processing message: {e}")
+                        self.chat_history.append(f"Error processing message: {str(e)}")
         except Exception as e:
-            logger.error(f"Error sending message: {e}")
+            logger.error(f"Error in send_message: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             self.chat_history.append(f"Error: {str(e)}")
 
@@ -295,7 +291,12 @@ class BrowserWindow(QMainWindow):
     def _process_action_queue(self):
         """Process the next action in the queue if possible."""
         try:
-            if self.action_in_progress or not self.page_load_complete:
+            if self.action_in_progress:
+                logger.debug("Action in progress, waiting...")
+                return
+                
+            if not self.page_load_complete:
+                logger.debug("Page still loading, waiting...")
                 return
                 
             if not self.action_queue:
@@ -306,27 +307,32 @@ class BrowserWindow(QMainWindow):
             self.action_in_progress = True
             
             # Get next action
-            action = self.action_queue.pop(0)
+            action = self.action_queue[0]  # Peek at next action without removing
             logger.info(f"Processing next action: {action}")
             
             # Process action
             success = self.process_action(action)
-            if not success:
+            if success:
+                self.action_queue.pop(0)  # Only remove if successful
+                logger.info("Action processed successfully")
+            else:
                 logger.error(f"Failed to process action: {action}")
                 self.chat_history.append("Error: Failed to execute action")
-            
+                self.action_queue.pop(0)  # Remove failed action to prevent blocking
+        
             # Reset action state
             self.action_in_progress = False
             
             # Process next action if available
             if self.action_queue:
-                self.action_timer.start()
-                
+                QTimer.singleShot(500, self._process_action_queue)  # Schedule next action with delay
+            
         except Exception as e:
             logger.error(f"Error processing action queue: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             self.action_in_progress = False
-            self.action_timer.stop()
+            if self.action_queue:
+                self.action_queue.pop(0)  # Remove problematic action
 
     def process_action(self, action_data):
         """Process a single action from the model."""
@@ -354,92 +360,149 @@ class BrowserWindow(QMainWindow):
                 
                 # Run JavaScript to fill input and submit
                 js_code = f"""
-                (function() {{
-                    // Try common search input selectors
-                    const selectors = [
-                        'input[type="search"]',
-                        'input[type="text"]',
-                        'input[name="q"]',
-                        'input[name="query"]',
-                        'input[name="search"]',
-                        'input[aria-label*="search" i]',
-                        'input[placeholder*="search" i]',
-                        'input'
-                    ];
-                    
-                    let input = null;
-                    for (const selector of selectors) {{
-                        const inputs = Array.from(document.querySelectorAll(selector));
-                        const visibleInputs = inputs.filter(el => {{
-                            const style = window.getComputedStyle(el);
-                            return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
-                        }});
-                        if (visibleInputs.length > 0) {{
-                            input = visibleInputs[0];
-                            break;
+                (async function() {{
+                    try {{
+                        // Enhanced element finder with more selectors
+                        function findSearchInput() {{
+                            // Common search input selectors
+                            const searchSelectors = [
+                                // Standard search inputs
+                                'input[type="search"]',
+                                'input[type="text"]',
+                                'input[name="q"]',
+                                'input[name="query"]',
+                                'input[name="search"]',
+                                'input[name="symbol"]', // For trading platforms
+                                'input[name="ticker"]', // For trading platforms
+                                
+                                // Inputs with search-related attributes
+                                'input[placeholder*="search" i]',
+                                'input[placeholder*="symbol" i]',
+                                'input[placeholder*="ticker" i]',
+                                'input[aria-label*="search" i]',
+                                'input[title*="search" i]',
+                                
+                                // Trading platform specific
+                                '.tv-search-row__input input',  // TradingView
+                                '.js-search-input',             // Common class
+                                '#symbol-search',               // Common ID
+                                
+                                // Common e-commerce search
+                                '#gh-ac',                       // eBay
+                                '#twotabsearchtextbox',         // Amazon
+                                'input[name="st"]',             // Common store search
+                                
+                                // Fallbacks
+                                'textarea[placeholder*="search" i]',
+                                'input[role="searchbox"]',
+                                'input[role="combobox"]',
+                                '[contenteditable="true"]',
+                                'input'
+                            ];
+                            
+                            // Try each selector
+                            for (const selector of searchSelectors) {{
+                                const elements = document.querySelectorAll(selector);
+                                for (const el of elements) {{
+                                    const style = window.getComputedStyle(el);
+                                    const rect = el.getBoundingClientRect();
+                                    const isVisible = style.display !== 'none' && 
+                                                   style.visibility !== 'hidden' && 
+                                                   el.offsetParent !== null &&
+                                                   rect.width > 0 &&
+                                                   rect.height > 0;
+                                    
+                                    if (isVisible) {{
+                                        console.log('Found search input:', el);
+                                        return el;
+                                    }}
+                                }}
+                            }}
+                            return null;
                         }}
-                    }}
-                    
-                    if (!input) {{
-                        console.log('No search input found');
-                        return false;
-                    }}
-                    
-                    // Focus and fill the input
-                    input.focus();
-                    input.value = "{value}";
-                    
-                    // Trigger events
-                    input.dispatchEvent(new Event('focus'));
-                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    
-                    // Try to find and click a submit button
-                    let submitted = false;
-                    
-                    // First try the closest form
-                    const form = input.closest('form');
-                    if (form) {{
-                        const submitButton = form.querySelector('button[type="submit"], input[type="submit"]');
-                        if (submitButton) {{
-                            submitButton.click();
-                            submitted = true;
+
+                        // Find search input
+                        const searchInput = findSearchInput();
+                        if (!searchInput) {{
+                            throw new Error('No search input found');
+                        }}
+
+                        // Focus and fill the input
+                        searchInput.focus();
+                        searchInput.value = "{value}";
+                        searchInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+
+                        // Try to find and click a search button
+                        const searchButtonSelectors = [
+                            'button[type="submit"]',
+                            'input[type="submit"]',
+                            'button[aria-label*="search" i]',
+                            'button[title*="search" i]',
+                            '.search-button',
+                            '.searchButton',
+                            '#search-button',
+                            '[role="search"] button'
+                        ];
+
+                        let searchButton = null;
+                        for (const selector of searchButtonSelectors) {{
+                            const button = document.querySelector(selector);
+                            if (button) {{
+                                const style = window.getComputedStyle(button);
+                                if (style.display !== 'none' && style.visibility !== 'hidden') {{
+                                    searchButton = button;
+                                    break;
+                                }}
+                            }}
+                        }}
+
+                        // Click the search button if found, otherwise submit the form
+                        if (searchButton) {{
+                            searchButton.click();
                         }} else {{
-                            // If no submit button, try submitting the form directly
-                            form.submit();
-                            submitted = true;
+                            const form = searchInput.closest('form');
+                            if (form) {{
+                                form.submit();
+                            }} else {{
+                                searchInput.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }}));
+                            }}
                         }}
+
+                        return {{
+                            success: true,
+                            message: `Successfully filled search input with: {value}`,
+                            details: {{
+                                inputType: searchInput.type,
+                                inputName: searchInput.name,
+                                inputId: searchInput.id
+                            }}
+                        }};
+                    }} catch (error) {{
+                        console.error('Search error:', error);
+                        return {{
+                            success: false,
+                            error: error.toString(),
+                            details: {{ message: error.message }}
+                        }};
                     }}
-                    
-                    // If no form submission worked, try to find a search button near the input
-                    if (!submitted) {{
-                        const searchButtons = Array.from(document.querySelectorAll('button')).filter(button => {{
-                            const text = button.textContent.toLowerCase();
-                            return text.includes('search') || text.includes('go') || text.includes('find');
-                        }});
-                        
-                        if (searchButtons.length > 0) {{
-                            searchButtons[0].click();
-                            submitted = true;
-                        }}
-                    }}
-                    
-                    // If still no submission, try pressing Enter
-                    if (!submitted) {{
-                        input.dispatchEvent(new KeyboardEvent('keypress', {{ key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }}));
-                    }}
-                    
-                    return true;
                 }})();
                 """
-                
+
                 def handle_search_result(result):
-                    if result:
-                        logger.info(f"Successfully executed search for: {value}")
+                    if isinstance(result, dict):
+                        if result.get('success'):
+                            logger.info(f"Search successful: {result.get('message', '')}")
+                            logger.info(f"Input details: {result.get('details', {})}")
+                        else:
+                            error = result.get('error', 'Unknown error')
+                            details = result.get('details', {})
+                            logger.error(f"Search failed: {error}")
+                            logger.error(f"Error details: {details}")
+                            self.chat_history.append(f"Error: {error}")
                     else:
-                        logger.warning(f"Failed to execute search for: {value}")
-                        self.chat_history.append("Error: Could not find search input")
-                
+                        logger.error(f"Unexpected result type: {type(result)}")
+                        self.chat_history.append("Error: Unexpected response type")
+
                 self.page.runJavaScript(js_code, handle_search_result)
                 return True
                 
@@ -448,37 +511,117 @@ class BrowserWindow(QMainWindow):
                 
                 # Run JavaScript to find and click element
                 js_code = f"""
-                (function() {{
-                    // Find all clickable elements
-                    const elements = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a'));
-                    
-                    // Filter for visible elements
-                    const visibleElements = elements.filter(el => {{
-                        const style = window.getComputedStyle(el);
-                        return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
-                    }});
-                    
-                    // Try to find element with matching text
-                    const targetElement = visibleElements.find(el => {{
-                        const text = (el.textContent || el.value || '').toLowerCase();
-                        return text.includes("{value}".toLowerCase());
-                    }});
-                    
-                    if (targetElement) {{
+                (async function() {{
+                    try {{
+                        // Platform-specific selectors for TradingView
+                        const tradingViewSelectors = [
+                            '.tv-symbol-price-quote__name',  // Symbol name
+                            '.tv-category-header__title',    // Section headers
+                            '.tv-symbol-header__text',       // Symbol header
+                            '.tv-screener__symbol',          // Screener symbols
+                            '.tv-chart-view__title',         // Chart title
+                            '.tv-dialog__title',             // Dialog titles
+                            '.tv-market-status__label',      // Market status
+                            '.js-button-text',               // Button text
+                            '.tv-control-input__input'       // Input controls
+                        ];
+                        
+                        // Common clickable elements
+                        const commonSelectors = [
+                            'a', 'button', 'input[type="submit"]', 'input[type="button"]',
+                            '[role="button"]', '[tabindex]', '[role="link"]', '[role="tab"]',
+                            '[role="menuitem"]'
+                        ];
+                        
+                        // Combine all selectors
+                        const allSelectors = [...tradingViewSelectors, ...commonSelectors];
+                        
+                        // Find all potential elements
+                        const elements = Array.from(document.querySelectorAll(allSelectors.join(',')));
+                        let targetElement = null;
+                        
+                        // Find visible element with matching text
+                        for (const el of elements) {{
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            const isVisible = style.display !== 'none' && 
+                                           style.visibility !== 'hidden' && 
+                                           el.offsetParent !== null &&
+                                           rect.width > 0 &&
+                                           rect.height > 0;
+                            
+                            if (!isVisible) continue;
+                            
+                            // Check text content and attributes
+                            const elementText = (
+                                el.textContent?.trim() ||
+                                el.value?.trim() ||
+                                el.getAttribute('aria-label')?.trim() ||
+                                el.getAttribute('title')?.trim() ||
+                                el.getAttribute('alt')?.trim() ||
+                                el.getAttribute('data-symbol')?.trim() || // For TradingView symbols
+                                el.getAttribute('data-name')?.trim() ||   // For TradingView elements
+                                ''
+                            ).toLowerCase();
+                            
+                            const searchText = "{value}".toLowerCase();
+                            if (elementText.includes(searchText)) {{
+                                targetElement = el;
+                                break;
+                            }}
+                        }}
+                        
+                        if (!targetElement) {{
+                            throw new Error(`No clickable element found with text: {value}`);
+                        }}
+                        
+                        // Scroll element into view
+                        targetElement.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                        
+                        // Click the element
+                        targetElement.focus();
                         targetElement.click();
-                        return true;
+                        
+                        // For TradingView, also try to trigger a custom event
+                        if (window.TradingView) {{
+                            targetElement.dispatchEvent(new CustomEvent('tv-action'));
+                        }}
+                        
+                        return {{ 
+                            success: true, 
+                            message: `Successfully clicked element with text: {value}`,
+                            details: {{
+                                tagName: targetElement.tagName,
+                                className: targetElement.className,
+                                id: targetElement.id
+                            }}
+                        }};
+                    }} catch (error) {{
+                        console.error('Click error:', error);
+                        return {{ 
+                            success: false, 
+                            error: error.toString(),
+                            details: {{ message: error.message }}
+                        }};
                     }}
-                    
-                    return false;
                 }})();
                 """
                 
                 def handle_click_result(result):
-                    if result:
-                        logger.info(f"Successfully clicked element with text: {value}")
+                    if isinstance(result, dict):
+                        if result.get('success'):
+                            logger.info(f"Click successful: {result.get('message', '')}")
+                            logger.info(f"Clicked element details: {result.get('details', {})}")
+                        else:
+                            error = result.get('error', 'Unknown error')
+                            details = result.get('details', {})
+                            logger.error(f"Click failed: {error}")
+                            logger.error(f"Error details: {details}")
+                            self.chat_history.append(f"Error: {error}")
                     else:
-                        logger.warning(f"Could not find clickable element with text: {value}")
-                        self.chat_history.append("Error: Could not find element to click")
+                        logger.error(f"Unexpected result type: {type(result)}")
+                        self.chat_history.append("Error: Unexpected response type")
                 
                 self.page.runJavaScript(js_code, handle_click_result)
                 return True
@@ -489,6 +632,275 @@ class BrowserWindow(QMainWindow):
                     self.chat_history.append(f"Assistant: {message}")
                 return True
                 
+            elif action_type == 'fill':
+                # Fill a form field by label or placeholder
+                field = action_data.get('field', '')
+                value = action_data.get('value', '')
+                
+                js_code = f"""
+                (async function() {{
+                    try {{
+                        // Find form field by label or placeholder
+                        const field = document.evaluate(
+                            `//input[@placeholder[contains(., "{field}")] or @aria-label[contains(., "{field}")]] | 
+                             //textarea[@placeholder[contains(., "{field}")] or @aria-label[contains(., "{field}")]] |
+                             //label[contains(text(), "{field}")]/following::input[1] |
+                             //label[contains(text(), "{field}")]/following::textarea[1]`,
+                            document,
+                            null,
+                            XPathResult.FIRST_ORDERED_NODE_TYPE,
+                            null
+                        ).singleNodeValue;
+                        
+                        if (!field) {{
+                            return {{ success: false, error: `Could not find field: {field}` }};
+                        }}
+                        
+                        // Focus and fill the field
+                        field.focus();
+                        field.value = "{value}";
+                        field.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        field.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        
+                        return {{ success: true }};
+                    }} catch (error) {{
+                        console.error('Error:', error);
+                        return {{ success: false, error: error.toString() }};
+                    }}
+                }})();
+                """
+                
+                def handle_fill_result(result):
+                    try:
+                        if isinstance(result, dict):
+                            if result.get('success'):
+                                logger.info(f"Successfully filled field '{field}' with value: {value}")
+                            else:
+                                error = result.get('error', 'Unknown error')
+                                logger.warning(f"Failed to fill field: {error}")
+                                self.chat_history.append(f"Error: {error}")
+                        else:
+                            logger.warning(f"Unexpected result type: {type(result)}")
+                            self.chat_history.append("Error: Unexpected response from page")
+                    except Exception as e:
+                        logger.error(f"Error in handle_fill_result: {e}")
+                        self.chat_history.append(f"Error processing result: {str(e)}")
+                
+                self.page.runJavaScript(js_code, handle_fill_result)
+                return True
+
+            elif action_type == 'select':
+                # Select an option from a dropdown
+                field = action_data.get('field', '')
+                value = action_data.get('value', '')
+                
+                js_code = f"""
+                (async function() {{
+                    try {{
+                        // Find select element by label or name
+                        const select = document.evaluate(
+                            `//select[@name[contains(., "{field}")] or @aria-label[contains(., "{field}")]] |
+                             //label[contains(text(), "{field}")]/following::select[1]`,
+                            document,
+                            null,
+                            XPathResult.FIRST_ORDERED_NODE_TYPE,
+                            null
+                        ).singleNodeValue;
+                        
+                        if (!select) {{
+                            return {{ success: false, error: `Could not find dropdown: {field}` }};
+                        }}
+                        
+                        // Find matching option
+                        const options = Array.from(select.options);
+                        const option = options.find(opt => 
+                            opt.text.toLowerCase().includes("{value}".toLowerCase()) ||
+                            opt.value.toLowerCase().includes("{value}".toLowerCase())
+                        );
+                        
+                        if (!option) {{
+                            return {{ success: false, error: `Could not find option: {value}` }};
+                        }}
+                        
+                        // Select the option
+                        select.value = option.value;
+                        select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        
+                        return {{ success: true }};
+                    }} catch (error) {{
+                        console.error('Error:', error);
+                        return {{ success: false, error: error.toString() }};
+                    }}
+                }})();
+                """
+                
+                def handle_select_result(result):
+                    try:
+                        if isinstance(result, dict):
+                            if result.get('success'):
+                                logger.info(f"Successfully selected '{value}' in dropdown '{field}'")
+                            else:
+                                error = result.get('error', 'Unknown error')
+                                logger.warning(f"Failed to select option: {error}")
+                                self.chat_history.append(f"Error: {error}")
+                        else:
+                            logger.warning(f"Unexpected result type: {type(result)}")
+                            self.chat_history.append("Error: Unexpected response from page")
+                    except Exception as e:
+                        logger.error(f"Error in handle_select_result: {e}")
+                        self.chat_history.append(f"Error processing result: {str(e)}")
+                
+                self.page.runJavaScript(js_code, handle_select_result)
+                return True
+
+            elif action_type == 'hover':
+                # Hover over an element
+                selector = action_data.get('selector', '')
+                
+                js_code = f"""
+                (async function() {{
+                    try {{
+                        const element = document.querySelector('{selector}');
+                        if (!element) {{
+                            return {{ success: false, error: `Could not find element: {selector}` }};
+                        }}
+                        
+                        // Trigger hover events
+                        element.dispatchEvent(new MouseEvent('mouseover', {{ bubbles: true }}));
+                        element.dispatchEvent(new MouseEvent('mouseenter', {{ bubbles: true }}));
+                        
+                        return {{ success: true }};
+                    }} catch (error) {{
+                        console.error('Error:', error);
+                        return {{ success: false, error: error.toString() }};
+                    }}
+                }})();
+                """
+                
+                def handle_hover_result(result):
+                    try:
+                        if isinstance(result, dict):
+                            if result.get('success'):
+                                logger.info(f"Successfully hovered over element: {selector}")
+                            else:
+                                error = result.get('error', 'Unknown error')
+                                logger.warning(f"Failed to hover: {error}")
+                                self.chat_history.append(f"Error: {error}")
+                        else:
+                            logger.warning(f"Unexpected result type: {type(result)}")
+                            self.chat_history.append("Error: Unexpected response from page")
+                    except Exception as e:
+                        logger.error(f"Error in handle_hover_result: {e}")
+                        self.chat_history.append(f"Error processing result: {str(e)}")
+                
+                self.page.runJavaScript(js_code, handle_hover_result)
+                return True
+
+            elif action_type == 'wait':
+                # Wait for an element to appear
+                selector = action_data.get('selector', '')
+                timeout = action_data.get('timeout', 10)  # Default 10 seconds
+                
+                js_code = f"""
+                (async function() {{
+                    try {{
+                        function waitForElement(selector, timeout) {{
+                            return new Promise((resolve, reject) => {{
+                                const startTime = Date.now();
+                                
+                                function checkElement() {{
+                                    const element = document.querySelector(selector);
+                                    if (element) {{
+                                        resolve(element);
+                                    }} else if (Date.now() - startTime > timeout * 1000) {{
+                                        reject(new Error(`Timeout waiting for element: ${{selector}}`));
+                                    }} else {{
+                                        setTimeout(checkElement, 100);
+                                    }}
+                                }}
+                                
+                                checkElement();
+                            }});
+                        }}
+                        
+                        await waitForElement('{selector}', {timeout});
+                        return {{ success: true }};
+                    }} catch (error) {{
+                        console.error('Error:', error);
+                        return {{ success: false, error: error.toString() }};
+                    }}
+                }})();
+                """
+                
+                def handle_wait_result(result):
+                    try:
+                        if isinstance(result, dict):
+                            if result.get('success'):
+                                logger.info(f"Successfully waited for element: {selector}")
+                            else:
+                                error = result.get('error', 'Unknown error')
+                                logger.warning(f"Wait failed: {error}")
+                                self.chat_history.append(f"Error: {error}")
+                        else:
+                            logger.warning(f"Unexpected result type: {type(result)}")
+                            self.chat_history.append("Error: Unexpected response from page")
+                    except Exception as e:
+                        logger.error(f"Error in handle_wait_result: {e}")
+                        self.chat_history.append(f"Error processing result: {str(e)}")
+                
+                self.page.runJavaScript(js_code, handle_wait_result)
+                return True
+
+            elif action_type == 'extract':
+                # Extract text content from elements
+                selector = action_data.get('selector', '')
+                attribute = action_data.get('attribute', 'textContent')  # Default to text content
+                
+                js_code = f"""
+                (async function() {{
+                    try {{
+                        const elements = Array.from(document.querySelectorAll('{selector}'));
+                        if (elements.length === 0) {{
+                            return {{ success: false, error: `No elements found matching: {selector}` }};
+                        }}
+                        
+                        const results = elements.map(el => {{
+                            if ('{attribute}' === 'textContent') {{
+                                return el.textContent.trim();
+                            }} else {{
+                                return el.getAttribute('{attribute}');
+                            }}
+                        }}).filter(Boolean);
+                        
+                        return {{ success: true, data: results }};
+                    }} catch (error) {{
+                        console.error('Error:', error);
+                        return {{ success: false, error: error.toString() }};
+                    }}
+                }})();
+                """
+                
+                def handle_extract_result(result):
+                    try:
+                        if isinstance(result, dict):
+                            if result.get('success'):
+                                data = result.get('data', [])
+                                logger.info(f"Successfully extracted {len(data)} items")
+                                self.chat_history.append(f"Extracted content: {data}")
+                            else:
+                                error = result.get('error', 'Unknown error')
+                                logger.warning(f"Extraction failed: {error}")
+                                self.chat_history.append(f"Error: {error}")
+                        else:
+                            logger.warning(f"Unexpected result type: {type(result)}")
+                            self.chat_history.append("Error: Unexpected response from page")
+                    except Exception as e:
+                        logger.error(f"Error in handle_extract_result: {e}")
+                        self.chat_history.append(f"Error processing result: {str(e)}")
+                
+                self.page.runJavaScript(js_code, handle_extract_result)
+                return True
+
             else:
                 logger.error(f"Unknown action type: {action_type}")
                 return False
@@ -527,21 +939,21 @@ class BrowserWindow(QMainWindow):
         """Handle page load finished event."""
         try:
             if ok:
-                logger.info("Page loaded successfully")
+                logger.info("Page load complete")
                 self.page_load_complete = True
+                
+                # Take a screenshot after load
                 self.capture_and_send_screenshot()
                 
-                # Continue processing actions
+                # Process next action after a short delay to let the page settle
                 QTimer.singleShot(1000, self._process_action_queue)
             else:
-                logger.error("Page failed to load")
+                logger.error("Page load failed")
+                self.page_load_complete = True  # Still mark as complete to allow further actions
                 self.chat_history.append("Error: Page failed to load")
-                self.page_load_complete = True
-                
         except Exception as e:
             logger.error(f"Error in handle_load_finished: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-            self.page_load_complete = True
 
     def _take_screenshot(self):
         """Take a screenshot of the browser view."""
