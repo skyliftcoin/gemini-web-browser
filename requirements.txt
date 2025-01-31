@@ -1,7 +1,5 @@
-Flask==3.0.0
-PySide6==6.6.1
 google-generativeai==0.3.2
-requests==2.31.0
-bandit==1.7.5
-python-dotenv==1.0.0
 Pillow==10.0.0
+PySide6==6.6.1
+python-dotenv==1.0.0
+requests==2.31.0
