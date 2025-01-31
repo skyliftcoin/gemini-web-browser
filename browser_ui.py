@@ -7,17 +7,19 @@ import json
 from datetime import datetime
 import codecs
 import uuid
+from PyQt6.QtCore import Qt, QUrl, QTimer
+from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineScript
+from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTextEdit, QLabel, QSplitter
 )
-from PyQt6.QtCore import QUrl, QTimer, Qt
-from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings, QWebEnginePage
 from PyQt6.QtGui import QPixmap, QTextCursor
 from gemini_integration import GeminiIntegration
 import requests
 import glob
+import tempfile
+import time
 
 # Configure logging with proper encoding for Windows console
 if sys.platform == 'win32':
@@ -28,586 +30,477 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('gemini.log', 'a', 'utf-8'),
+        logging.FileHandler('browser.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
 class CustomWebEnginePage(QWebEnginePage):
-    """Custom QWebEnginePage class."""
-    def __init__(self, profile, parent=None):
-        try:
-            logger.debug("Initializing CustomWebEnginePage")
-            super().__init__(profile, parent)
-            logger.debug("CustomWebEnginePage super() initialized")
-            
-            self.loadFinished.connect(self._on_load_finished)
-            logger.debug("loadFinished signal connected")
-            
-            logger.info("CustomWebEnginePage initialization complete")
-        except Exception as e:
-            logger.error(f"Error in CustomWebEnginePage.__init__: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            raise
-
-    def _on_load_finished(self, ok):
-        """Handle page load completion."""
-        try:
-            logger.debug(f"Page load finished: {ok}")
-            if hasattr(self.parent(), '_page_loaded'):
-                logger.debug("Calling parent._page_loaded")
-                self.parent()._page_loaded(ok)
-            else:
-                logger.warning("Parent does not have _page_loaded method")
-        except Exception as e:
-            logger.error(f"Error in _on_load_finished: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
+    """Custom web engine page with additional functionality."""
+    
+    def __init__(self, parent=None):
+        super().__init__(QWebEngineProfile.defaultProfile(), parent)
+        self._parent = parent  # Store parent reference
 
     def javaScriptConsoleMessage(self, level, message, line, source):
         """Handle JavaScript console messages."""
-        try:
-            level_str = {
-                0: "INFO",
-                1: "WARNING",
-                2: "ERROR"
-            }.get(level, "UNKNOWN")
-            
-            logger.debug(f"JS Console [{level_str}] {message} (line {line}, source: {source})")
-            
-            # Log errors to the chat history
-            if level == 2:  # Error level
-                self.chat_history.append(f"JavaScript Error: {message}")
-                
-        except Exception as e:
-            logger.error(f"Error handling JavaScript console message: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
+        logger.info(f"JS Console: {message}")
+        if hasattr(self._parent, 'js_console_log'):
+            self._parent.js_console_log(message)
 
     def certificateError(self, error):
         """Handle SSL certificate errors."""
-        try:
-            logger.warning(f"Certificate error: {error.errorDescription()}")
-            # Accept the certificate for now
-            return True
-        except Exception as e:
-            logger.error(f"Error handling certificate error: {str(e)}")
-            return False
+        logger.warning(f"Certificate error: {error.errorDescription()}")
+        return True  # Accept all certificates for now
 
     def javaScriptAlert(self, securityOrigin, msg):
         """Handle JavaScript alerts."""
         try:
-            logger.info(f"JS Alert from {securityOrigin.toString()}: {msg}")
-            return super().javaScriptAlert(securityOrigin, msg)
+            logger.info(f"JavaScript alert: {msg}")
+            if hasattr(self._parent, 'chat_history'):
+                self._parent.chat_history.append(f"Alert: {msg}")
+            return True
         except Exception as e:
             logger.error(f"Error handling JavaScript alert: {e}")
             return False
 
-class BrowserApp(QMainWindow):
-    """Main browser application window."""
-
+class BrowserWindow(QMainWindow):
+    """Main browser window."""
+    
     def __init__(self):
-        """Initialize the browser application."""
+        super().__init__()
+        self.init_ui()
+        
+    def init_ui(self):
+        """Initialize the UI."""
         try:
-            logger.debug("Initializing BrowserApp")
-            super().__init__()
+            # Set window properties
+            self.setWindowTitle('Web Browser Assistant')
+            self.setGeometry(100, 100, 1200, 800)
             
-            # Set up Gemini integration
-            logger.debug("Setting up Gemini integration")
-            self.gemini = GeminiIntegration()
-            logger.info("Gemini integration initialized")
+            # Create main layout
+            main_layout = QVBoxLayout()
             
-            # Create main widget and layout
-            logger.debug("Creating main widget and layout")
-            main_widget = QWidget()
-            self.setCentralWidget(main_widget)
-            layout = QVBoxLayout(main_widget)
+            # Create navigation toolbar
+            nav_toolbar = QHBoxLayout()
             
-            # Create browser view
-            logger.debug("Creating browser view")
-            self.profile = QWebEngineProfile()
-            self.profile.setHttpUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-            
+            # Create browser view first
             self.browser = QWebEngineView()
-            self.page = CustomWebEnginePage(self.profile, self)
+            self.page = CustomWebEnginePage(self.browser)
             self.browser.setPage(self.page)
             
-            # Create toolbar
-            logger.debug("Creating toolbar")
-            toolbar = QHBoxLayout()
+            # Connect signals
+            self.browser.urlChanged.connect(self.update_url)
+            self.page.loadFinished.connect(self.handle_load_finished)
             
-            # Create navigation buttons with fixed actions
-            logger.debug("Creating navigation buttons")
-            back_btn = QPushButton("←")
-            back_btn.setMaximumWidth(40)
-            back_btn.clicked.connect(lambda: self.browser.page().triggerAction(QWebEnginePage.WebAction.Back))
-            logger.debug("Back button created and connected")
+            # Set default homepage
+            self.default_url = 'https://www.google.com'
+            self.browser.setUrl(QUrl(self.default_url))
             
-            forward_btn = QPushButton("→")
-            forward_btn.setMaximumWidth(40)
-            forward_btn.clicked.connect(lambda: self.browser.page().triggerAction(QWebEnginePage.WebAction.Forward))
-            logger.debug("Forward button created and connected")
+            # Back button
+            self.back_button = QPushButton('←')
+            self.back_button.clicked.connect(self.browser.back)
+            nav_toolbar.addWidget(self.back_button)
             
-            refresh_btn = QPushButton("⟳")
-            refresh_btn.setMaximumWidth(40)
-            refresh_btn.clicked.connect(lambda: self.browser.page().triggerAction(QWebEnginePage.WebAction.Reload))
-            logger.debug("Refresh button created and connected")
+            # Forward button
+            self.forward_button = QPushButton('→')
+            self.forward_button.clicked.connect(self.browser.forward)
+            nav_toolbar.addWidget(self.forward_button)
             
-            # Create URL bar
-            logger.debug("Creating URL bar")
+            # Refresh button
+            self.refresh_button = QPushButton('↻')
+            self.refresh_button.clicked.connect(self.browser.reload)
+            nav_toolbar.addWidget(self.refresh_button)
+            
+            # Home button
+            self.home_button = QPushButton('🏠')
+            self.home_button.clicked.connect(self.reset_to_homepage)
+            nav_toolbar.addWidget(self.home_button)
+            
+            # URL bar
             self.url_bar = QLineEdit()
-            self.url_bar.returnPressed.connect(self._navigate_to_url)
-            logger.debug("URL bar created and connected")
+            self.url_bar.returnPressed.connect(self.navigate_to_url)
+            nav_toolbar.addWidget(self.url_bar)
             
-            # Add items to toolbar
-            toolbar.addWidget(back_btn)
-            toolbar.addWidget(forward_btn)
-            toolbar.addWidget(refresh_btn)
-            toolbar.addWidget(self.url_bar)
-            logger.debug("Toolbar items added")
+            # Add navigation toolbar to main layout
+            main_layout.addLayout(nav_toolbar)
+            
+            # Add browser to layout
+            main_layout.addWidget(self.browser, stretch=1)
             
             # Create chat interface
-            logger.debug("Creating chat interface")
-            chat_layout = QVBoxLayout()
+            chat_layout = QHBoxLayout()
             
             # Chat history
             self.chat_history = QTextEdit()
             self.chat_history.setReadOnly(True)
             chat_layout.addWidget(self.chat_history)
             
-            # Screenshot display
-            self.screenshot_label = QLabel()
-            self.screenshot_label.setMaximumHeight(200)
-            self.screenshot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            chat_layout.addWidget(self.screenshot_label)
+            # Chat input
+            input_layout = QVBoxLayout()
+            self.chat_input = QLineEdit()
+            self.chat_input.returnPressed.connect(self.send_message)
+            input_layout.addWidget(self.chat_input)
             
-            # Input field
-            self.input_field = QLineEdit()
-            self.input_field.returnPressed.connect(self._handle_user_input)
-            chat_layout.addWidget(self.input_field)
+            # Send button
+            self.send_button = QPushButton('Send')
+            self.send_button.clicked.connect(self.send_message)
+            input_layout.addWidget(self.send_button)
             
-            # Create splitter for browser and chat
-            logger.debug("Creating splitter")
-            splitter = QSplitter(Qt.Orientation.Horizontal)
+            chat_layout.addLayout(input_layout)
             
-            # Add browser container (with toolbar) to splitter
-            browser_container = QWidget()
-            browser_layout = QVBoxLayout(browser_container)
-            browser_layout.addLayout(toolbar)
-            browser_layout.addWidget(self.browser)
-            splitter.addWidget(browser_container)
+            # Add chat interface to main layout
+            main_layout.addLayout(chat_layout)
             
-            # Add chat container to splitter
-            chat_container = QWidget()
-            chat_container.setLayout(chat_layout)
-            splitter.addWidget(chat_container)
+            # Create central widget and set layout
+            central_widget = QWidget()
+            central_widget.setLayout(main_layout)
+            self.setCentralWidget(central_widget)
             
-            # Set initial splitter sizes
-            splitter.setSizes([600, 300])
+            # Initialize Gemini integration
+            self.gemini = GeminiIntegration()
+            logger.info("Gemini integration initialized")
             
-            # Add splitter to main layout
-            layout.addWidget(splitter)
+            # Initialize action queue
+            self.action_queue = []
+            self.action_in_progress = False
+            self.page_load_complete = True
             
-            # Set window properties
-            self.setWindowTitle("Gemini Web Browser")
-            self.setGeometry(100, 100, 1024, 768)
-            
-            # Navigate to default page
-            self.browser.setUrl(QUrl("https://www.google.com"))
-            
-            logger.info("BrowserApp initialization complete")
+            # Action timer
+            self.action_timer = QTimer()
+            self.action_timer.timeout.connect(self._process_action_queue)
             
         except Exception as e:
-            logger.error(f"Error in BrowserApp.__init__: {str(e)}")
+            logger.error(f"Error in BrowserWindow.init_ui: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-            raise
-
-    def _page_loaded(self, ok):
-        """Handle page load completion."""
+            
+    def navigate_to_url(self, url=None):
+        """Navigate to a URL"""
         try:
-            logger.info(f"Page loaded: {ok}")
-            if ok:
-                # Wait a bit for JavaScript to initialize
-                QTimer.singleShot(1000, self._check_pending_actions)
-        except Exception as e:
-            logger.error(f"Error in _page_loaded: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def _check_pending_actions(self):
-        """Check and execute any pending actions."""
-        try:
-            if hasattr(self, 'pending_search') and self.pending_search:
-                logger.info(f"Executing pending search: {self.pending_search}")
-                self._execute_search()
-        except Exception as e:
-            logger.error(f"Error checking pending actions: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def _navigate_to_url(self):
-        """Navigate to the URL entered in the URL bar."""
-        try:
-            url = self.url_bar.text()
-            logger.debug(f"Navigating to URL: {url}")
+            if url is None:
+                url = self.url_bar.text()
+            
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
-                logger.debug(f"Added https:// prefix: {url}")
+            
+            logger.info(f"Navigating to: {url}")
             self.browser.setUrl(QUrl(url))
-        except Exception as e:
-            logger.error(f"Error in _navigate_to_url: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def _handle_user_input(self):
-        """Handle user input from the chat interface."""
-        try:
-            user_input = self.input_field.text()
-            logger.debug(f"Handling user input: {user_input}")
-            self.input_field.clear()
-            self.chat_history.append(f"You: {user_input}")
-            
-            # Take screenshot before processing
-            screenshot = self._take_screenshot()
-            
-            # Process the input
-            if user_input.strip():
-                try:
-                    current_url = self.browser.url().toString()
-                    response = self.gemini.process_request(user_input, current_url, screenshot)
-                    if response:
-                        self._handle_response(response)
-                except Exception as e:
-                    logger.error(f"Error processing request: {str(e)}")
-                    logger.error(f"Traceback: {traceback.format_exc()}")
-                    self.chat_history.append(f"Error: Failed to process request - {str(e)}")
             
         except Exception as e:
-            logger.error(f"Error in _handle_user_input: {str(e)}")
+            logger.error(f"Error in navigate_to_url: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
+            self.chat_history.append(f"Error navigating to URL: {str(e)}")
 
-    def _handle_response(self, response):
-        """Handle the response from Gemini."""
+    def update_url(self, url):
+        """Update URL bar with current URL"""
         try:
-            if isinstance(response, dict):
-                # Handle message
-                if 'message' in response:
-                    self.chat_history.append(f"Assistant: {response['message']}")
+            if hasattr(self, 'url_bar'):
+                self.url_bar.setText(url.toString())
+                self.url_bar.setCursorPosition(0)
+        except Exception as e:
+            logger.error(f"Error in update_url: {str(e)}")
+
+    def send_message(self):
+        """Send a message to Gemini."""
+        try:
+            # Get message from input
+            message = self.chat_input.text().strip()
+            if not message:
+                return
                 
-                # Handle actions
-                if 'actions' in response:
-                    for action in response['actions']:
-                        action_type = action.get('action')
-                        
-                        if action_type == 'navigate':
-                            url = action.get('url')
-                            if url:
-                                self.navigate_to(url)
-                                
-                        elif action_type == 'search':
-                            value = action.get('value')
-                            selector = action.get('selector')
-                            if value:
-                                self.perform_search(value, selector)
-                                
-                        elif action_type == 'click':
-                            selector = action.get('selector')
-                            if selector:
-                                self.click_element(selector)
-                                
-                        elif action_type == 'respond':
-                            message = action.get('message')
-                            if message:
-                                self.chat_history.append(f"Assistant: {message}")
-                                
-            else:
-                # If response is just a string, display it
+            # Clear input
+            self.chat_input.clear()
+            
+            # Add to chat history
+            self.chat_history.append(f"You: {message}")
+            
+            # Get current URL
+            current_url = self.browser.url().toString()
+            
+            # Take screenshot
+            screenshot = None
+            if current_url:
+                screenshot = self.capture_screenshot()
+            
+            # Process with Gemini
+            response = self.gemini.process_request(message, current_url, screenshot)
+            
+            # Handle response
+            if isinstance(response, str):
                 self.chat_history.append(f"Assistant: {response}")
+            elif isinstance(response, dict):
+                # First handle any message
+                if 'message' in response:
+                    # Parse JSON strings in message
+                    try:
+                        message_lines = response['message'].strip().split('\n')
+                        for line in message_lines:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                # Try to parse as JSON
+                                action = json.loads(line)
+                                if isinstance(action, dict) and 'action' in action:
+                                    self.queue_action(action)
+                                else:
+                                    self.chat_history.append(f"Assistant: {line}")
+                            except json.JSONDecodeError:
+                                # Not JSON, treat as normal message
+                                self.chat_history.append(f"Assistant: {line}")
+                    except Exception as e:
+                        logger.error(f"Error parsing message: {e}")
+                        self.chat_history.append(f"Assistant: {response['message']}")
                 
+                # Then handle any explicit actions
+                if 'actions' in response and isinstance(response['actions'], list):
+                    for action in response['actions']:
+                        if isinstance(action, dict) and 'action' in action:
+                            self.queue_action(action)
+            else:
+                logger.warning(f"Invalid response type: {type(response)}")
+            
         except Exception as e:
-            logger.error(f"Error handling response: {str(e)}")
+            logger.error(f"Error sending message: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             self.chat_history.append(f"Error: {str(e)}")
 
-    def navigate_to(self, url):
-        """Navigate to a URL."""
+    def queue_action(self, action_data):
+        """Add an action to the queue for processing."""
         try:
-            if not url.startswith(('http://', 'https://')):
-                url = 'https://' + url
-            logger.info(f"Navigating to: {url}")
-            self.url_bar.setText(url)
-            self.browser.setUrl(QUrl(url))
-            self.browser.page().loadFinished.connect(lambda ok: 
-                logger.info(f"Page load {'succeeded' if ok else 'failed'}: {url}"))
-        except Exception as e:
-            logger.error(f"Error navigating to {url}: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            self.chat_history.append(f"Error navigating to {url}: {str(e)}")
-
-    def perform_search(self, value, selector=None):
-        """Perform a search using the specified value and selector."""
-        try:
-            if not selector:
-                selector = "input[name='q']"  # Default to Google search
+            if not isinstance(action_data, dict):
+                logger.error(f"Invalid action data type: {type(action_data)}")
+                return False
+                
+            action_type = action_data.get('action')
+            if not action_type:
+                logger.error("No action type specified")
+                return False
+                
+            logger.info(f"Queueing action: {action_data}")
+            self.action_queue.append(action_data)
             
-            logger.info(f"Performing search with value: {value}, selector: {selector}")
+            # Start processing if not already running
+            if not self.action_timer.isActive():
+                self.action_timer.start()
             
-            # Store the search value for use after page load
-            self.pending_search = value
-            self.search_selector = selector
-            
-            # Execute search
-            self._execute_search()
+            return True
             
         except Exception as e:
-            logger.error(f"Error performing search: {e}")
+            logger.error(f"Error queueing action: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-            self.chat_history.append(f"Error performing search: {str(e)}")
+            return False
 
-    def _execute_search(self):
-        """Execute the pending search."""
+    def _process_action_queue(self):
+        """Process the next action in the queue if possible."""
         try:
-            if not hasattr(self, 'pending_search') or not self.pending_search:
-                logger.warning("No pending search to execute")
-                return
-            
-            if not hasattr(self, 'search_selector'):
-                logger.warning("No search selector available")
+            if self.action_in_progress or not self.page_load_complete:
                 return
                 
-            logger.info(f"Executing search with value: {self.pending_search}, selector: {self.search_selector}")
+            if not self.action_queue:
+                logger.info("No actions in queue")
+                self.action_timer.stop()
+                return
+                
+            self.action_in_progress = True
             
-            js_code = """
-            (function() {
-                function findInteractiveElements() {
-                    // Find all potentially interactive elements
-                    const elements = {
-                        inputs: Array.from(document.querySelectorAll('input[type="text"], input[type="search"], input:not([type]), textarea')),
-                        searchForms: Array.from(document.querySelectorAll('form')).filter(form => {
-                            const action = form.getAttribute('action') || '';
-                            const inputs = form.querySelectorAll('input');
-                            return action.includes('search') || 
-                                   Array.from(inputs).some(input => input.name && input.name.includes('search') || 
-                                   input.id && input.id.includes('search'));
-                        }),
-                        searchButtons: Array.from(document.querySelectorAll('button, input[type="submit"]')).filter(btn => {
-                            const text = (btn.textContent || btn.value || '').toLowerCase();
-                            return text.includes('search') || text.includes('find') || text.includes('go');
-                        })
-                    };
-                    console.log('Found elements:', elements);
-                    return elements;
-                }
-
-                function findBestInput(selector, elements) {
-                    // First try the exact selector
-                    let input = document.querySelector(selector);
-                    if (input && input.offsetParent !== null) {
-                        console.log('Found input with exact selector:', selector);
-                        return input;
-                    }
-
-                    // Try to find the most relevant input
-                    const allInputs = elements.inputs;
-                    const visibleInputs = allInputs.filter(el => el.offsetParent !== null);
-                    
-                    if (!visibleInputs.length) {
-                        console.error('No visible input elements found');
-                        return null;
-                    }
-
-                    // Prioritize search inputs
-                    const searchInputs = visibleInputs.filter(input => {
-                        const attrs = [input.id, input.name, input.placeholder, input.className].map(a => (a || '').toLowerCase());
-                        return attrs.some(attr => attr.includes('search') || attr.includes('query') || attr.includes('q'));
-                    });
-
-                    if (searchInputs.length) {
-                        console.log('Found search input:', searchInputs[0]);
-                        return searchInputs[0];
-                    }
-
-                    // Fall back to the first visible input
-                    console.log('Using first visible input:', visibleInputs[0]);
-                    return visibleInputs[0];
-                }
-
-                function findSubmitButton(input, elements) {
-                    // First check if input is in a form
-                    const form = input.form;
-                    if (form) {
-                        // Look for submit button in the form
-                        const formButton = form.querySelector('button[type="submit"], input[type="submit"]');
-                        if (formButton) {
-                            console.log('Found submit button in form:', formButton);
-                            return formButton;
-                        }
-                    }
-
-                    // Look for nearby buttons
-                    const searchButtons = elements.searchButtons;
-                    if (searchButtons.length) {
-                        console.log('Found search button:', searchButtons[0]);
-                        return searchButtons[0];
-                    }
-
-                    return null;
-                }
-
-                function submitSearch(input, button) {
-                    if (button) {
-                        console.log('Clicking submit button');
-                        button.click();
-                    } else if (input.form) {
-                        console.log('Submitting form');
-                        input.form.submit();
-                    } else {
-                        console.log('Simulating Enter key');
-                        input.dispatchEvent(new KeyboardEvent('keydown', {
-                            key: 'Enter',
-                            code: 'Enter',
-                            keyCode: 13,
-                            which: 13,
-                            bubbles: true,
-                            cancelable: true
-                        }));
-                    }
-                }
-
-                async function fillAndSubmit(selector, value) {
-                    const elements = findInteractiveElements();
-                    const input = findBestInput(selector, elements);
-                    
-                    if (!input) {
-                        console.error('Could not find suitable input');
-                        return false;
-                    }
-
-                    // Focus and fill the input
-                    input.focus();
-                    input.value = value;
-
-                    // Dispatch events
-                    ['input', 'change'].forEach(eventType => {
-                        input.dispatchEvent(new Event(eventType, { bubbles: true }));
-                    });
-
-                    // Find and click submit button
-                    const button = findSubmitButton(input, elements);
-                    submitSearch(input, button);
-
-                    return true;
-                }
-
-                return fillAndSubmit(%s, %s);
-            })();
-            """
+            # Get next action
+            action = self.action_queue.pop(0)
+            logger.info(f"Processing next action: {action}")
             
-            # Format the JavaScript code with the selector and value
-            formatted_js = js_code % (json.dumps(self.search_selector), json.dumps(self.pending_search))
+            # Process action
+            success = self.process_action(action)
+            if not success:
+                logger.error(f"Failed to process action: {action}")
+                self.chat_history.append("Error: Failed to execute action")
             
-            # Execute the search
-            self.browser.page().runJavaScript(formatted_js, self._handle_search_result)
+            # Reset action state
+            self.action_in_progress = False
             
+            # Process next action if available
+            if self.action_queue:
+                self.action_timer.start()
+                
         except Exception as e:
-            logger.error(f"Error executing search: {e}")
+            logger.error(f"Error processing action queue: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-            self.chat_history.append(f"Error executing search: {str(e)}")
+            self.action_in_progress = False
+            self.action_timer.stop()
 
-    def _handle_search_result(self, result):
-        """Handle the result of a search action."""
+    def process_action(self, action_data):
+        """Process a single action from the model."""
         try:
-            if result:
-                logger.info("Search executed successfully")
-                self.pending_search = None
-                self.search_selector = None
-            else:
-                logger.error("Failed to execute search")
-                self.chat_history.append("Could not find search input")
-                self.pending_search = None
-                self.search_selector = None
-        except Exception as e:
-            logger.error(f"Error handling search result: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def navigate_to(self, url):
-        """Navigate to a URL."""
-        try:
-            if not url.startswith(('http://', 'https://')):
-                url = 'https://' + url
-            logger.info(f"Navigating to: {url}")
-            self.url_bar.setText(url)
-            self.browser.setUrl(QUrl(url))
-            self.browser.page().loadFinished.connect(lambda ok: 
-                logger.info(f"Page load {'succeeded' if ok else 'failed'}: {url}"))
-        except Exception as e:
-            logger.error(f"Error navigating to {url}: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            self.chat_history.append(f"Error navigating to {url}: {str(e)}")
-
-    def click_element(self, selector):
-        """Click an element using the specified selector."""
-        try:
-            logger.info(f"Clicking element with selector: {selector}")
+            logger.info(f"Processing action: {action_data}")
             
-            js_code = """
-            (function() {
-                function findElement(selector) {
-                    return document.querySelector(selector);
-                }
-
-                function clickElement(element) {
-                    // Focus the element
-                    element.focus();
-                    
-                    // Create and dispatch events
-                    const events = [
-                        new MouseEvent('mouseover', { bubbles: true }),
-                        new MouseEvent('mousedown', { bubbles: true }),
-                        new MouseEvent('mouseup', { bubbles: true }),
-                        new MouseEvent('click', { bubbles: true })
+            if not isinstance(action_data, dict):
+                logger.error(f"Invalid action data type: {type(action_data)}")
+                return False
+            
+            action_type = action_data.get('action')
+            if not action_type:
+                logger.error("No action type specified")
+                return False
+            
+            if action_type == 'navigate':
+                url = action_data.get('url', '')
+                if not url.startswith(('http://', 'https://')):
+                    url = 'https://' + url
+                self.navigate_to_url(url)
+                return True
+                
+            elif action_type == 'search':
+                value = action_data.get('value', '')
+                
+                # Run JavaScript to fill input and submit
+                js_code = f"""
+                (function() {{
+                    // Try common search input selectors
+                    const selectors = [
+                        'input[type="search"]',
+                        'input[type="text"]',
+                        'input[name="q"]',
+                        'input[name="query"]',
+                        'input[name="search"]',
+                        'input[aria-label*="search" i]',
+                        'input[placeholder*="search" i]',
+                        'input'
                     ];
                     
-                    events.forEach(event => element.dispatchEvent(event));
+                    let input = null;
+                    for (const selector of selectors) {{
+                        const inputs = Array.from(document.querySelectorAll(selector));
+                        const visibleInputs = inputs.filter(el => {{
+                            const style = window.getComputedStyle(el);
+                            return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
+                        }});
+                        if (visibleInputs.length > 0) {{
+                            input = visibleInputs[0];
+                            break;
+                        }}
+                    }}
                     
-                    // If it's a link, navigate
-                    if (element.tagName === 'A' && element.href) {
-                        window.location.href = element.href;
-                    }
+                    if (!input) {{
+                        console.log('No search input found');
+                        return false;
+                    }}
+                    
+                    // Focus and fill the input
+                    input.focus();
+                    input.value = "{value}";
+                    
+                    // Trigger events
+                    input.dispatchEvent(new Event('focus'));
+                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    
+                    // Try to find and click a submit button
+                    let submitted = false;
+                    
+                    // First try the closest form
+                    const form = input.closest('form');
+                    if (form) {{
+                        const submitButton = form.querySelector('button[type="submit"], input[type="submit"]');
+                        if (submitButton) {{
+                            submitButton.click();
+                            submitted = true;
+                        }} else {{
+                            // If no submit button, try submitting the form directly
+                            form.submit();
+                            submitted = true;
+                        }}
+                    }}
+                    
+                    // If no form submission worked, try to find a search button near the input
+                    if (!submitted) {{
+                        const searchButtons = Array.from(document.querySelectorAll('button')).filter(button => {{
+                            const text = button.textContent.toLowerCase();
+                            return text.includes('search') || text.includes('go') || text.includes('find');
+                        }});
+                        
+                        if (searchButtons.length > 0) {{
+                            searchButtons[0].click();
+                            submitted = true;
+                        }}
+                    }}
+                    
+                    // If still no submission, try pressing Enter
+                    if (!submitted) {{
+                        input.dispatchEvent(new KeyboardEvent('keypress', {{ key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }}));
+                    }}
                     
                     return true;
-                }
-
-                const element = findElement(%s);
-                if (!element) {
-                    console.error('Element not found');
-                    return false;
-                }
+                }})();
+                """
                 
-                if (!element.offsetParent) {
-                    console.error('Element is not visible');
-                    return false;
-                }
+                def handle_search_result(result):
+                    if result:
+                        logger.info(f"Successfully executed search for: {value}")
+                    else:
+                        logger.warning(f"Failed to execute search for: {value}")
+                        self.chat_history.append("Error: Could not find search input")
                 
-                return clickElement(element);
-            })();
-            """
-            
-            # Execute the click
-            self.browser.page().runJavaScript(js_code % json.dumps(selector), self._handle_click_result)
-            
-        except Exception as e:
-            logger.error(f"Error clicking element: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            self.chat_history.append(f"Error clicking element: {str(e)}")
-
-    def _handle_click_result(self, result):
-        """Handle the result of a click action."""
-        try:
-            if result:
-                logger.info("Click executed successfully")
+                self.page.runJavaScript(js_code, handle_search_result)
+                return True
+                
+            elif action_type == 'click':
+                value = action_data.get('value', '')
+                
+                # Run JavaScript to find and click element
+                js_code = f"""
+                (function() {{
+                    // Find all clickable elements
+                    const elements = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a'));
+                    
+                    // Filter for visible elements
+                    const visibleElements = elements.filter(el => {{
+                        const style = window.getComputedStyle(el);
+                        return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
+                    }});
+                    
+                    // Try to find element with matching text
+                    const targetElement = visibleElements.find(el => {{
+                        const text = (el.textContent || el.value || '').toLowerCase();
+                        return text.includes("{value}".toLowerCase());
+                    }});
+                    
+                    if (targetElement) {{
+                        targetElement.click();
+                        return true;
+                    }}
+                    
+                    return false;
+                }})();
+                """
+                
+                def handle_click_result(result):
+                    if result:
+                        logger.info(f"Successfully clicked element with text: {value}")
+                    else:
+                        logger.warning(f"Could not find clickable element with text: {value}")
+                        self.chat_history.append("Error: Could not find element to click")
+                
+                self.page.runJavaScript(js_code, handle_click_result)
+                return True
+                
+            elif action_type == 'respond':
+                message = action_data.get('message', '')
+                if message:
+                    self.chat_history.append(f"Assistant: {message}")
+                return True
+                
             else:
-                logger.error("Failed to execute click")
-                self.chat_history.append("Could not find or click element")
+                logger.error(f"Unknown action type: {action_type}")
+                return False
+                
         except Exception as e:
-            logger.error(f"Error handling click result: {e}")
+            logger.error(f"Error processing action: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
+
+    def js_console_log(self, message):
+        """Handle console.log messages from JavaScript."""
+        logger.info(f"JS Console: {message}")
 
     def handle_js_result(self, result):
         """Handle the result of JavaScript execution."""
@@ -628,17 +521,27 @@ class BrowserApp(QMainWindow):
                     self.search_selector = None
         except Exception as e:
             logger.error(f"Error handling JavaScript result: {e}")
-            logger.error(traceback.format_exc())
-
-    def closeEvent(self, event):
-        """Handle application close."""
-        try:
-            logger.info("Closing application")
-            event.accept()
-        except Exception as e:
-            logger.exception("Error closing application")
             logger.error(f"Traceback: {traceback.format_exc()}")
-            event.accept()
+
+    def handle_load_finished(self, ok):
+        """Handle page load finished event."""
+        try:
+            if ok:
+                logger.info("Page loaded successfully")
+                self.page_load_complete = True
+                self.capture_and_send_screenshot()
+                
+                # Continue processing actions
+                QTimer.singleShot(1000, self._process_action_queue)
+            else:
+                logger.error("Page failed to load")
+                self.chat_history.append("Error: Page failed to load")
+                self.page_load_complete = True
+                
+        except Exception as e:
+            logger.error(f"Error in handle_load_finished: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            self.page_load_complete = True
 
     def _take_screenshot(self):
         """Take a screenshot of the browser view."""
@@ -646,15 +549,16 @@ class BrowserApp(QMainWindow):
             # Create screenshots directory if it doesn't exist
             if not os.path.exists('screenshots'):
                 os.makedirs('screenshots')
-                
+            
             # Clean up old screenshots
-            self._cleanup_screenshots()
-                
+            self._cleanup_old_screenshots()
+            
             # Take new screenshot
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             unique_id = str(uuid.uuid4())[:8]
             screenshot_path = f"screenshots/screenshot_{timestamp}_{unique_id}.png"
             
+            # Take screenshot of browser view
             self.browser.grab().save(screenshot_path)
             logger.info(f"Screenshot saved: {screenshot_path}")
             return screenshot_path
@@ -664,12 +568,12 @@ class BrowserApp(QMainWindow):
             logger.error(f"Traceback: {traceback.format_exc()}")
             return None
 
-    def _cleanup_screenshots(self):
-        """Clean up old screenshots."""
+    def _cleanup_old_screenshots(self):
+        """Clean up old screenshot files"""
         try:
             if not os.path.exists('screenshots'):
                 return
-                
+            
             # Get list of screenshots
             screenshots = glob.glob('screenshots/*.png')
             
@@ -685,28 +589,94 @@ class BrowserApp(QMainWindow):
                         logger.info(f"Deleted old screenshot: {screenshot}")
                     except Exception as e:
                         logger.warning(f"Failed to delete screenshot {screenshot}: {e}")
-                        
+            
         except Exception as e:
             logger.error(f"Error cleaning up screenshots: {e}")
+
+    def capture_and_send_screenshot(self):
+        """Capture screenshot and send to chat history"""
+        try:
+            screenshot_path = self._take_screenshot()
+            if screenshot_path and os.path.exists(screenshot_path):
+                self.chat_history.append(f"\nScreenshot saved: {screenshot_path}")
+                logger.info(f"Screenshot captured and saved to {screenshot_path}")
+            else:
+                logger.warning("Failed to capture screenshot")
+                
+        except Exception as e:
+            logger.error(f"Error capturing screenshot: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
+            
+    def capture_screenshot(self):
+        """Capture screenshot"""
+        try:
+            # Create screenshots directory if it doesn't exist
+            if not os.path.exists('screenshots'):
+                os.makedirs('screenshots')
+            
+            # Clean up old screenshots
+            self._cleanup_old_screenshots()
+            
+            # Take new screenshot
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            unique_id = str(uuid.uuid4())[:8]
+            screenshot_path = f"screenshots/screenshot_{timestamp}_{unique_id}.png"
+            
+            # Take screenshot of browser view
+            self.browser.grab().save(screenshot_path)
+            logger.info(f"Screenshot saved: {screenshot_path}")
+            return screenshot_path
+            
+        except Exception as e:
+            logger.error(f"Error taking screenshot: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
+
+    def reset_to_homepage(self):
+        """Reset to homepage"""
+        try:
+            self.browser.setUrl(QUrl(self.default_url))
+        except Exception as e:
+            logger.error(f"Error resetting to homepage: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+    def closeEvent(self, event):
+        """Handle application close."""
+        try:
+            logger.info("Closing application")
+            event.accept()
+        except Exception as e:
+            logger.exception("Error closing application")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            event.accept()
 
 if __name__ == '__main__':
     try:
+        # Configure logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler('browser.log'),
+                logging.StreamHandler()
+            ]
+        )
+        logger = logging.getLogger(__name__)
+        
+        # Create application
         logger.debug("Starting main application")
         app = QApplication(sys.argv)
-        logger.debug("QApplication created")
         
-        logger.debug("Creating BrowserApp instance")
-        browser = BrowserApp()
-        logger.debug("BrowserApp instance created")
-        
-        logger.debug("Showing browser window")
+        # Create and show browser window
+        logger.debug("Creating browser window")
+        browser = BrowserWindow()
         browser.show()
-        logger.debug("Browser window shown")
         
+        # Enter event loop
         logger.debug("Entering application event loop")
         sys.exit(app.exec())
+        
     except Exception as e:
-        logger.error(f"Error in main application: {str(e)}")
+        logger.error(f"Error in main: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         sys.exit(1)

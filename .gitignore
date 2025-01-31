@@ -35,4 +35,7 @@ ENV/
 screenshots/
 *.log
 .env
+# API Keys
+gemini key.txt
+*key*.txt
 api_key.txt
