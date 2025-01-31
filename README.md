@@ -1,29 +1,32 @@
 # Gemini Web Browser Assistant
 
-An intelligent web browser assistant powered by Google's Gemini AI model. This browser can understand natural language commands and perform complex web tasks automatically.
+An intelligent web browser assistant powered by Google's Gemini AI model that enables natural language control of web browsing activities.
 
 ## Features
-
-- Natural language command processing
-- Automated web navigation
-- Intelligent form filling and search
-- Smart element interaction
-- Multi-step task execution
-- Screenshot capture capability
+- **Natural Language Command Processing**: Control your browsing with simple English commands
+- **Automated Web Navigation**: Smart URL handling and page navigation
+- **Intelligent Search**: Enhanced search capabilities across various platforms
+- **Advanced Element Interaction**: 
+  - Smart element detection and clicking
+  - Robust form filling
+  - Platform-specific handling (e.g., TradingView, eBay)
+- **Multi-step Task Execution**: Chain multiple actions together
+- **Screenshot Capabilities**: Capture and save webpage screenshots
+- **Error Handling**: Detailed logging and error reporting
+- **Cross-Platform Support**: Works on Windows, macOS, and Linux
 
 ## Requirements
-
 - Python 3.8+
 - PyQt6
 - Google Generative AI Python SDK
 - Internet connection
-- Gemini API key
+- Gemini API key (version: gemini-2.0-flash-thinking-exp-01-21)
 
 ## Setup
-
 1. Clone the repository:
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/skyliftcoin/gemini-web-browser.git
+cd gemini-web-browser
 ```
 
 2. Install dependencies:
@@ -31,9 +34,9 @@ git clone <your-repository-url>
 pip install -r requirements.txt
 ```
 
-3. Create an api_key.txt file with your Gemini API key:
+3. Create a `gemini key.txt` file with your Gemini API key:
 ```bash
-echo "your-api-key" > api_key.txt
+echo "your-api-key" > "gemini key.txt"
 ```
 
 4. Run the browser:
@@ -41,19 +44,66 @@ echo "your-api-key" > api_key.txt
 python browser_ui.py
 ```
 
-## Usage
+## Usage Examples
+Type natural language commands in the input box:
 
-Simply type your request in natural language, and the browser will execute it. Examples:
+### Basic Navigation
+- "Go to google.com"
+- "Navigate to youtube.com"
+- "Open tradingview.com"
 
-- "Go to eBay and search for white rabbits"
-- "Navigate to Craigslist and find Ford trucks"
-- "Go to chat.com and send a message"
+### Search Operations
+- "Search for 'Python programming' on Google"
+- "Go to eBay and search for vintage cameras"
+- "Find Bitcoin price on TradingView"
+
+### Complex Tasks
+- "Go to TradingView, search for AAPL, and click on the 1D timeframe"
+- "Navigate to eBay, search for vintage watches, and sort by price"
+- "Go to Hugging Face, find stable diffusion models, and sort by downloads"
 
 ## Architecture
+The application consists of three main components:
 
-- `browser_ui.py`: Main browser UI and web interaction logic
-- `gemini_integration.py`: Gemini AI integration and command processing
+### browser_ui.py
+- Main browser window and UI components
+- Web interaction logic
+- JavaScript injection for element interaction
+- Screenshot handling
+- Event management
+
+### browser_api.py
+- API endpoint definitions
+- Request handling
+- Response processing
+- Error management
+
+### gemini_integration.py
+- Gemini AI model integration
+- Natural language processing
+- Command parsing and execution
+- Context management
+
+## Security
+- API keys are automatically excluded from git via .gitignore
+- SSL certificate handling for secure connections
+- Proper error handling and input validation
+- Secure storage of sensitive information
+
+## Contributing
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## License
+MIT License - see [LICENSE](LICENSE) for details
 
-MIT License
+## Acknowledgments
+- Google's Gemini AI model
+- PyQt6 framework
+- The open-source community
+
+## Support
+For support, please open an issue in the GitHub repository.
