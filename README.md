@@ -1,5 +1,9 @@
 # Gemini Web Browser Assistant
 
+
+***** THIS IS A LONG WAY FROM BEING READY TO DEPLOY BUT ITS A STARTING POINT ******
+
+
 An intelligent web browser assistant powered by Google's Gemini AI model that enables natural language control of web browsing activities.
 
 ## Features
